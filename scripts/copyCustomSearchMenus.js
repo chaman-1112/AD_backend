@@ -22,6 +22,7 @@ const { Pool } = pg;
 const CLOUDFRONT_BASE = String(process.env.CLOUDFRONT_BASE || '')
     .trim()
     .replace(/\/+$/, '');
+const ENABLE_UI_DESIGN_TYPE_FIX = process.env.ENABLE_UI_DESIGN_TYPE_FIX === 'true';
 
 const PRODUCT_TYPE_MAP = {
     1: 'diamond',
@@ -189,15 +190,38 @@ async function loginAndGetPage(baseUrl) {
 }
 
 async function getCsrfToken(page, baseUrl) {
-    await page.goto(`${baseUrl}/superadmin/custom_search_menu_types`, { waitUntil: 'networkidle' });
-    const csrf = await page.evaluate(() =>
-        document.querySelector('meta[name="csrf-token"]')?.getAttribute('content')
-    );
-    if (!csrf) {
-        const bodySnippet = await page.evaluate(() => document.body.innerText.substring(0, 200));
-        throw new Error(`Could not obtain CSRF token. Page content: ${bodySnippet}`);
+    const requestErrors = [];
+
+    // Preferred path: read token from the current authenticated DOM (no extra network calls).
+    try {
+        const currentPageCsrf = await page.evaluate(() =>
+            document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || ''
+        );
+        if (currentPageCsrf) return currentPageCsrf;
+    } catch (err) {
+        requestErrors.push(`current-page csrf read failed: ${err.message}`);
     }
-    return csrf;
+
+    // Fallback: navigate to known admin pages and read CSRF from DOM.
+    const domCandidates = [
+        `${baseUrl}/superadmin/custom_search_menu_types`,
+        `${baseUrl}/superadmin`,
+        `${baseUrl}/superadmin/login`,
+    ];
+    for (const url of domCandidates) {
+        try {
+            await page.goto(url, { waitUntil: 'domcontentloaded' });
+            const domCsrf = await page.evaluate(() =>
+                document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || ''
+            );
+            if (domCsrf) return domCsrf;
+            requestErrors.push(`no csrf meta at ${url}`);
+        } catch (err) {
+            requestErrors.push(`dom fallback error at ${url}: ${err.message}`);
+        }
+    }
+
+    throw new Error(`Could not obtain CSRF token via DOM flow. Details: ${requestErrors.join(' | ')}`);
 }
 
 async function fixDesignType(page, baseUrl, sourceTypeId, newTypeId) {
@@ -432,8 +456,6 @@ async function copyCustomSearchMenus(sourceId, targetId, sourceScope = 'org', ta
             if (pngPayload) log(`    PNG: ${pngPayload.buffer.length} bytes`, 'cyan');
             if (svgPayload) log(`    SVG: ${svgPayload.buffer.length} bytes`, 'cyan');
 
-            csrf = await getCsrfToken(page, baseUrl);
-
             let ok = false;
             let newTypeId = null;
             try {
@@ -475,7 +497,7 @@ async function copyCustomSearchMenus(sourceId, targetId, sourceScope = 'org', ta
                 }
             }
 
-            if (ok && newTypeId) {
+            if (ok && newTypeId && ENABLE_UI_DESIGN_TYPE_FIX) {
                 const fixed = await fixDesignType(page, baseUrl, parent.id, newTypeId);
                 if (fixed) log(`    ✓ design_type synced from source`, 'green');
             }
@@ -506,8 +528,6 @@ async function copyCustomSearchMenus(sourceId, targetId, sourceScope = 'org', ta
                 ]);
                 if (pngPayload) log(`    PNG: ${pngPayload.buffer.length} bytes`, 'cyan');
                 if (svgPayload) log(`    SVG: ${svgPayload.buffer.length} bytes`, 'cyan');
-
-                csrf = await getCsrfToken(page, baseUrl);
 
                 let ok = false;
                 let newTypeId = null;
@@ -550,7 +570,7 @@ async function copyCustomSearchMenus(sourceId, targetId, sourceScope = 'org', ta
                     }
                 }
 
-                if (ok && newTypeId) {
+                if (ok && newTypeId && ENABLE_UI_DESIGN_TYPE_FIX) {
                     const fixed = await fixDesignType(page, baseUrl, child.id, newTypeId);
                     if (fixed) log(`    ✓ design_type synced from source`, 'green');
                 }
@@ -576,8 +596,6 @@ async function copyCustomSearchMenus(sourceId, targetId, sourceScope = 'org', ta
                 }
 
                 log(`\n→ menu id=${menu.id} type=${menu.custom_search_menu_type_id}→${mappedTypeId} order=${menu.menu_order}`, 'yellow');
-
-                csrf = await getCsrfToken(page, baseUrl);
 
                 let ok = false;
                 try {
@@ -644,6 +662,7 @@ async function copyCustomSearchMenus(sourceId, targetId, sourceScope = 'org', ta
     } catch (error) {
         log(`\n✗ Fatal Error: ${error.message}`, 'red');
         console.error(error);
+        throw error;
     } finally {
         await pool.end();
         if (browser) await browser.close();

@@ -70,22 +70,6 @@ export async function dbQuery(text, params) {
     return getPool().query(text, params);
 }
 
-export async function ensureAppSchema() {
-    await dbQuery(`
-        CREATE TABLE IF NOT EXISTS automation_users (
-            admin_user_id BIGINT PRIMARY KEY,
-            email TEXT NOT NULL UNIQUE,
-            display_name TEXT,
-            role TEXT NOT NULL DEFAULT 'operator',
-            active_env TEXT,
-            last_login_at TIMESTAMPTZ,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        )
-    `);
-    await dbQuery(`CREATE INDEX IF NOT EXISTS idx_automation_users_email ON automation_users(email)`);
-}
-
 const poolProxy = {
     query: (...args) => dbQuery(...args),
     connect: (...args) => getPool().connect(...args),

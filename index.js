@@ -8,10 +8,9 @@ import dataRouter from './routes/data.js';
 import replicateRouter from './routes/replicate.js';
 import authRouter from './routes/auth.js';
 import historyRouter from './routes/history.js';
-import pool, { ensureAppSchema, switchDbConfig } from './db.js';
-import { getActiveEnv, getEnvConfig, initEnvManager, switchActiveEnv } from './envManager.js';
+import pool, { switchDbConfig } from './db.js';
+import { getActiveEnv, getEnvConfig, initEnvManager } from './envManager.js';
 import { loadUserOrgScope, requireAuth } from './middleware/auth.js';
-import { validateSwitchEnvPayload } from './middleware/validate.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -48,7 +47,7 @@ app.use(session({
 app.use('/api/auth', authRouter);
 app.use('/api/data', requireAuth, loadUserOrgScope, dataRouter);
 app.use('/api/replicate', requireAuth, loadUserOrgScope, replicateRouter);
-app.use('/api/history', requireAuth, loadUserOrgScope, historyRouter);
+app.use('/api/history', historyRouter);
 
 // --- Health check ---
 app.get('/api/health', async (req, res) => {
@@ -70,8 +69,7 @@ app.get('/api/whoami', (req, res) => {
 
 app.get('/api/current-env', requireAuth, (req, res) => {
     try {
-        const env = getActiveEnv();
-        res.json({ env, email: getEnvConfig(env).STAGE_SUPERADMIN_EMAIL || '' });
+        res.json({ env: getActiveEnv(), email: getEnvConfig().STAGE_SUPERADMIN_EMAIL || '' });
     } catch (err) {
         res.status(500).json({ code: 'ENV_READ_ERROR', message: err.message });
     }
@@ -86,29 +84,8 @@ app.get('/api/current-env-public', (req, res) => {
     }
 });
 
-app.post('/api/switch-env', validateSwitchEnvPayload, async (req, res) => {
-    const { env } = req.body || {};
-    try {
-        const currentEnv = getActiveEnv();
-        if (currentEnv === env) {
-            return res.json({ ok: true, restarting: false, message: `Already on ${env}` });
-        }
-
-        switchActiveEnv(env);
-        await switchDbConfig(getEnvConfig(env));
-        await ensureAppSchema();
-        if (req.session?.user) {
-            req.session.destroy(() => {});
-        }
-        return res.json({ ok: true, restarting: false, env });
-    } catch (err) {
-        return res.status(500).json({ code: 'ENV_SWITCH_ERROR', message: err.message });
-    }
-});
-
 async function startServer() {
-    await switchDbConfig(getEnvConfig(getActiveEnv()));
-    await ensureAppSchema();
+    await switchDbConfig(getEnvConfig());
     app.listen(PORT, () => {
         console.log(`\n  Replication Tool API running at http://localhost:${PORT}`);
         console.log(`  Health check: http://localhost:${PORT}/api/health\n`);

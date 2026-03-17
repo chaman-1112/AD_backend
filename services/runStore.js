@@ -1,20 +1,43 @@
-import { dbQuery } from '../db.js';
+import { mkdir, readFile, rename, writeFile } from 'fs/promises';
+import { dirname, resolve } from 'path';
+import { fileURLToPath } from 'url';
 
-function isMissingTableError(err) {
-    return err?.code === '42P01' || /relation .* does not exist/i.test(err?.message || '');
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const STORE_PATH = resolve(__dirname, '../tmp/runs.txt');
+let storeQueue = Promise.resolve();
+
+function toStatus(status) {
+    return status || 'pending';
 }
 
-async function safeQuery(text, params = []) {
+async function readStore() {
     try {
-        return await dbQuery(text, params);
+        const raw = await readFile(STORE_PATH, 'utf-8');
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed) ? parsed : [];
     } catch (err) {
-        if (isMissingTableError(err)) return { rows: [], rowCount: 0 };
+        if (err?.code === 'ENOENT') return [];
+        if (err instanceof SyntaxError) {
+            console.warn('Invalid runs.txt JSON detected. Resetting in-memory store for this operation.');
+            return [];
+        }
         throw err;
     }
 }
 
-function toStatus(status) {
-    return status || 'pending';
+async function writeStore(runs) {
+    await mkdir(dirname(STORE_PATH), { recursive: true });
+    const tempPath = `${STORE_PATH}.tmp`;
+    await writeFile(tempPath, JSON.stringify(runs, null, 2), 'utf-8');
+    await rename(tempPath, STORE_PATH);
+}
+
+function withStoreMutation(mutator) {
+    const next = storeQueue.then(() => mutator());
+    // Keep queue alive even after failures so future operations still run.
+    storeQueue = next.catch(() => {});
+    return next;
 }
 
 function normalizeRunRow(row) {
@@ -23,192 +46,174 @@ function normalizeRunRow(row) {
         mode: row.mode,
         label: row.label,
         status: row.status,
-        userId: row.user_id,
-        orgId: row.org_id,
-        user: row.user_name,
-        userEmail: row.user_email,
-        request: row.request_json || {},
-        resultMessage: row.result_message || null,
-        activeEnv: row.active_env || null,
-        startedAt: row.started_at,
-        endedAt: row.ended_at,
+        userId: row.userId ?? null,
+        orgId: row.orgId ?? null,
+        user: row.user ?? null,
+        userEmail: row.userEmail ?? null,
+        request: row.request || {},
+        resultMessage: row.resultMessage || null,
+        activeEnv: row.activeEnv || null,
+        startedAt: row.startedAt || null,
+        endedAt: row.endedAt || null,
         steps: Array.isArray(row.steps) ? row.steps : [],
     };
 }
 
-export async function createRun(payload) {
-    const {
-        id,
-        mode,
-        label,
-        status = 'running',
-        userId = null,
-        orgId = null,
-        userName = null,
-        userEmail = null,
-        request = null,
-        activeEnv = null,
-    } = payload;
+function hasOrgAccess(row, orgScope = []) {
+    if (!Array.isArray(orgScope) || orgScope.length === 0) return true;
+    return row.orgId == null || orgScope.includes(Number(row.orgId));
+}
 
-    await safeQuery(
-        `INSERT INTO runs (
-            id, mode, label, status, user_id, org_id, user_name, user_email, request_json, active_env, started_at
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,NOW())
-        ON CONFLICT (id) DO UPDATE SET
-            mode = EXCLUDED.mode,
-            label = EXCLUDED.label,
-            status = EXCLUDED.status,
-            user_id = EXCLUDED.user_id,
-            org_id = EXCLUDED.org_id,
-            user_name = EXCLUDED.user_name,
-            user_email = EXCLUDED.user_email,
-            request_json = EXCLUDED.request_json,
-            active_env = EXCLUDED.active_env`,
-        [id, mode, label, status, userId, orgId, userName, userEmail, JSON.stringify(request || {}), activeEnv]
-    );
+function ensureRun(runs, runId) {
+    let run = runs.find((r) => r.id === runId);
+    if (!run) {
+        run = {
+            id: runId,
+            mode: 'unknown',
+            label: runId,
+            status: 'running',
+            userId: null,
+            orgId: null,
+            user: null,
+            userEmail: null,
+            request: {},
+            resultMessage: null,
+            activeEnv: null,
+            startedAt: new Date().toISOString(),
+            endedAt: null,
+            steps: [],
+            events: [],
+        };
+        runs.push(run);
+    }
+    if (!Array.isArray(run.steps)) run.steps = [];
+    if (!Array.isArray(run.events)) run.events = [];
+    return run;
+}
+
+export async function createRun(payload) {
+    return withStoreMutation(async () => {
+        const runs = await readStore();
+        const run = ensureRun(runs, payload.id);
+        run.mode = payload.mode;
+        run.label = payload.label;
+        run.status = payload.status || 'running';
+        run.userId = payload.userId ?? null;
+        run.orgId = payload.orgId ?? null;
+        run.user = payload.userName ?? null;
+        run.userEmail = payload.userEmail ?? null;
+        run.request = payload.request || {};
+        run.activeEnv = payload.activeEnv ?? null;
+        run.startedAt = run.startedAt || new Date().toISOString();
+        await writeStore(runs);
+    });
 }
 
 export async function upsertStep(runId, step, seq = 0) {
-    await safeQuery(
-        `INSERT INTO run_steps (run_id, step_id, label, status, duration_ms, error_text, seq, updated_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())
-         ON CONFLICT (run_id, step_id) DO UPDATE SET
-            label = EXCLUDED.label,
-            status = EXCLUDED.status,
-            duration_ms = EXCLUDED.duration_ms,
-            error_text = EXCLUDED.error_text,
-            seq = EXCLUDED.seq,
-            updated_at = NOW()`,
-        [
-            runId,
-            step.stepId || step.id,
-            step.label || null,
-            toStatus(step.status),
-            step.duration || step.duration_ms || null,
-            step.error || null,
+    return withStoreMutation(async () => {
+        const runs = await readStore();
+        const run = ensureRun(runs, runId);
+        const stepId = step.stepId || step.id;
+        if (!stepId) return;
+
+        const nextStep = {
+            id: stepId,
+            label: step.label || null,
+            status: toStatus(step.status),
+            duration: step.duration ?? step.duration_ms ?? null,
+            error: step.error || null,
             seq,
-        ]
-    );
+        };
+        const idx = run.steps.findIndex((s) => s.id === stepId);
+        if (idx >= 0) run.steps[idx] = { ...run.steps[idx], ...nextStep };
+        else run.steps.push(nextStep);
+        run.steps.sort((a, b) => (a.seq || 0) - (b.seq || 0));
+
+        await writeStore(runs);
+    });
 }
 
 export async function addEvent(runId, event) {
-    await safeQuery(
-        `INSERT INTO run_events (run_id, ts, type, message) VALUES ($1, NOW(), $2, $3)`,
-        [runId, event.type || 'log', String(event.message || '')]
-    );
+    return withStoreMutation(async () => {
+        const runs = await readStore();
+        const run = ensureRun(runs, runId);
+        run.events.push({
+            timestamp: new Date().toISOString(),
+            type: event.type || 'log',
+            message: String(event.message || ''),
+        });
+        await writeStore(runs);
+    });
 }
 
 export async function finalizeRun(runId, { status, resultMessage = null } = {}) {
-    await safeQuery(
-        `UPDATE runs SET status = COALESCE($2, status), result_message = $3, ended_at = NOW() WHERE id = $1`,
-        [runId, status || null, resultMessage]
-    );
+    return withStoreMutation(async () => {
+        const runs = await readStore();
+        const run = ensureRun(runs, runId);
+        run.status = status || run.status;
+        run.resultMessage = resultMessage;
+        run.endedAt = new Date().toISOString();
+        await writeStore(runs);
+    });
 }
 
 export async function listRuns({ status, mode, q, limit = 50, offset = 0, orgScope = [] }) {
-    const values = [];
-    const where = [];
+    const rows = await readStore();
+    const needle = String(q || '').toLowerCase();
+    const filtered = rows
+        .filter((r) => !status || r.status === status)
+        .filter((r) => !mode || r.mode === mode)
+        .filter((r) => !needle || [r.label, r.user, r.userEmail].some((v) => String(v || '').toLowerCase().includes(needle)))
+        .filter((r) => hasOrgAccess(r, orgScope))
+        .sort((a, b) => new Date(b.startedAt || 0).getTime() - new Date(a.startedAt || 0).getTime());
 
-    if (status) {
-        values.push(status);
-        where.push(`r.status = $${values.length}`);
-    }
-    if (mode) {
-        values.push(mode);
-        where.push(`r.mode = $${values.length}`);
-    }
-    if (q) {
-        values.push(`%${q}%`);
-        where.push(`(r.label ILIKE $${values.length} OR COALESCE(r.user_name,'') ILIKE $${values.length} OR COALESCE(r.user_email,'') ILIKE $${values.length})`);
-    }
-    if (Array.isArray(orgScope) && orgScope.length > 0) {
-        values.push(orgScope);
-        where.push(`(r.org_id = ANY($${values.length}::bigint[]) OR r.org_id IS NULL)`);
-    }
-
-    values.push(limit);
-    values.push(offset);
-
-    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
-    const { rows } = await safeQuery(
-        `SELECT
-            r.*,
-            COALESCE(
-                json_agg(
-                    json_build_object(
-                        'id', s.step_id,
-                        'label', s.label,
-                        'status', s.status,
-                        'duration', s.duration_ms,
-                        'error', s.error_text
-                    ) ORDER BY s.seq
-                ) FILTER (WHERE s.run_id IS NOT NULL),
-                '[]'::json
-            ) AS steps
-         FROM runs r
-         LEFT JOIN run_steps s ON s.run_id = r.id
-         ${whereSql}
-         GROUP BY r.id
-         ORDER BY r.started_at DESC
-         LIMIT $${values.length - 1} OFFSET $${values.length}`,
-        values
-    );
-    return rows.map(normalizeRunRow);
+    return filtered
+        .slice(offset, offset + limit)
+        .map(normalizeRunRow);
 }
 
 export async function getRunById(runId, orgScope = []) {
-    const params = [runId];
-    let orgFilter = '';
-    if (Array.isArray(orgScope) && orgScope.length > 0) {
-        params.push(orgScope);
-        orgFilter = ` AND (r.org_id = ANY($2::bigint[]) OR r.org_id IS NULL)`;
-    }
-    const { rows } = await safeQuery(
-        `SELECT r.* FROM runs r WHERE r.id = $1 ${orgFilter} LIMIT 1`,
-        params
-    );
-    if (!rows.length) return null;
-
-    const run = rows[0];
-    const [stepsRes, eventsRes] = await Promise.all([
-        safeQuery(
-            `SELECT step_id AS id, label, status, duration_ms AS duration, error_text AS error
-             FROM run_steps WHERE run_id = $1 ORDER BY seq`,
-            [runId]
-        ),
-        safeQuery(
-            `SELECT ts AS timestamp, type, message
-             FROM run_events WHERE run_id = $1 ORDER BY ts`,
-            [runId]
-        ),
-    ]);
+    const rows = await readStore();
+    const run = rows.find((r) => r.id === runId);
+    if (!run || !hasOrgAccess(run, orgScope)) return null;
 
     return {
         ...normalizeRunRow(run),
-        steps: stepsRes.rows,
-        events: eventsRes.rows,
+        steps: Array.isArray(run.steps)
+            ? run.steps
+                .slice()
+                .sort((a, b) => (a.seq || 0) - (b.seq || 0))
+                .map((s) => ({
+                    id: s.id,
+                    label: s.label || null,
+                    status: s.status || 'pending',
+                    duration: s.duration ?? null,
+                    error: s.error || null,
+                }))
+            : [],
+        events: Array.isArray(run.events) ? run.events : [],
     };
 }
 
 export async function deleteRun(runId, orgScope = []) {
-    const values = [runId];
-    let filter = '';
-    if (Array.isArray(orgScope) && orgScope.length > 0) {
-        values.push(orgScope);
-        filter = ` AND (org_id = ANY($2::bigint[]) OR org_id IS NULL)`;
-    }
-    const { rowCount } = await safeQuery(`DELETE FROM runs WHERE id = $1${filter}`, values);
-    return rowCount;
+    return withStoreMutation(async () => {
+        const rows = await readStore();
+        const next = rows.filter((r) => !(r.id === runId && hasOrgAccess(r, orgScope)));
+        const deleted = rows.length - next.length;
+        if (deleted > 0) await writeStore(next);
+        return deleted;
+    });
 }
 
 export async function deleteAllRuns(orgScope = []) {
-    if (Array.isArray(orgScope) && orgScope.length > 0) {
-        const { rowCount } = await safeQuery(
-            `DELETE FROM runs WHERE org_id = ANY($1::bigint[]) OR org_id IS NULL`,
-            [orgScope]
-        );
-        return rowCount;
-    }
-    const { rowCount } = await safeQuery(`DELETE FROM runs`);
-    return rowCount;
+    return withStoreMutation(async () => {
+        const rows = await readStore();
+        let next = [];
+        if (Array.isArray(orgScope) && orgScope.length > 0) {
+            next = rows.filter((r) => !hasOrgAccess(r, orgScope));
+        }
+        const deleted = rows.length - next.length;
+        if (deleted > 0) await writeStore(next);
+        return deleted;
+    });
 }

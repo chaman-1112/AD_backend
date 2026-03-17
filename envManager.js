@@ -1,6 +1,3 @@
-import { readFileSync } from 'fs';
-import { resolve } from 'path';
-
 const ENV_KEYS = [
     'STAGE_BASE_URL',
     'STAGE_SUPERADMIN_EMAIL',
@@ -18,70 +15,28 @@ const ENV_KEYS = [
     'CLOUDFRONT_BASE',
 ];
 
-let activeEnv = 'stage';
-let envConfigByName = {
-    stage: {},
-    production: {},
-};
+let envConfig = {};
 
-function parseBlock(content, name) {
-    const pattern = name === 'production'
-        ? /# ---- BEGIN PRODUCTION ----\r?\n([\s\S]*?)# ---- END PRODUCTION ----/
-        : /# ---- BEGIN STAGE ----\r?\n([\s\S]*?)# ---- END STAGE ----/;
-    const match = content.match(pattern);
-    if (!match) return {};
-
-    const cfg = {};
-    for (const rawLine of match[1].split(/\r?\n/)) {
-        const line = rawLine.trim().replace(/^#\s?/, '');
-        if (!line || line.startsWith('#')) continue;
-        const idx = line.indexOf('=');
-        if (idx <= 0) continue;
-        const key = line.slice(0, idx).trim();
-        const value = line.slice(idx + 1).trim();
-        if (!key) continue;
-        cfg[key] = value;
-    }
-    return cfg;
-}
-
-function parseActiveMarker(content) {
-    const marker = content.match(/^#\s*ACTIVE_ENV\s*=\s*(\S+)/m);
-    if (!marker) return 'stage';
-    return marker[1] === 'production' ? 'production' : 'stage';
-}
-
-export function initEnvManager(envPath) {
-    const resolvedPath = resolve(envPath);
-    const content = readFileSync(resolvedPath, 'utf-8');
-    const stage = parseBlock(content, 'stage');
-    const production = parseBlock(content, 'production');
-    activeEnv = parseActiveMarker(content);
-    envConfigByName = { stage, production };
-
-    applyProcessEnv(activeEnv);
-}
-
-export function applyProcessEnv(name) {
-    const selected = envConfigByName[name] || {};
+export function initEnvManager() {
+    envConfig = {};
     for (const key of ENV_KEYS) {
-        if (selected[key] !== undefined) process.env[key] = selected[key];
+        if (process.env[key] !== undefined) {
+            envConfig[key] = process.env[key];
+        }
     }
+    applyProcessEnv();
 }
 
-export function switchActiveEnv(name) {
-    if (name !== 'stage' && name !== 'production') {
-        throw new Error('env must be "stage" or "production"');
+export function applyProcessEnv() {
+    for (const key of ENV_KEYS) {
+        if (envConfig[key] !== undefined) process.env[key] = envConfig[key];
     }
-    activeEnv = name;
-    applyProcessEnv(name);
-    return { env: activeEnv };
 }
 
 export function getActiveEnv() {
-    return activeEnv;
+    return process.env.ACTIVE_ENV === 'production' ? 'production' : 'stage';
 }
 
-export function getEnvConfig(name = activeEnv) {
-    return envConfigByName[name] || {};
+export function getEnvConfig() {
+    return envConfig;
 }

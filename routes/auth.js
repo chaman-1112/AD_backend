@@ -2,7 +2,6 @@ import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import { dbQuery } from '../db.js';
 import { validateLoginPayload } from '../middleware/validate.js';
-import { getActiveEnv } from '../envManager.js';
 import { requireAuth, loadUserOrgScope } from '../middleware/auth.js';
 
 const router = Router();
@@ -41,18 +40,6 @@ router.post('/login', validateLoginPayload, async (req, res) => {
 
         const role = 'admin';
         const displayName = user.email?.split('@')[0] || 'User';
-        await dbQuery(
-            `INSERT INTO automation_users (admin_user_id, email, display_name, role, active_env, last_login_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
-             ON CONFLICT (admin_user_id) DO UPDATE SET
-                email = EXCLUDED.email,
-                display_name = EXCLUDED.display_name,
-                role = EXCLUDED.role,
-                active_env = EXCLUDED.active_env,
-                last_login_at = NOW(),
-                updated_at = NOW()`,
-            [Number(user.id), user.email, displayName, role, getActiveEnv()]
-        );
 
         req.session.user = {
             id: Number(user.id),

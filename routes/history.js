@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { validateHistoryQuery } from '../middleware/validate.js';
-import { deleteAllRuns, deleteRun, getRunById, listRuns } from '../services/runStore.js';
+import { getRunById, listRuns } from '../services/runStore.js';
 
 const router = Router();
 
@@ -12,7 +12,6 @@ router.get('/', validateHistoryQuery, async (req, res) => {
             q: req.query.q || '',
             limit: req.query.limit,
             offset: req.query.offset,
-            orgScope: req.user?.orgScope || [],
         });
         res.json(rows);
     } catch (err) {
@@ -22,30 +21,11 @@ router.get('/', validateHistoryQuery, async (req, res) => {
 
 router.get('/:runId', async (req, res) => {
     try {
-        const run = await getRunById(req.params.runId, req.user?.orgScope || []);
+        const run = await getRunById(req.params.runId);
         if (!run) return res.status(404).json({ code: 'NOT_FOUND', message: 'Run not found' });
         return res.json(run);
     } catch (err) {
         return res.status(500).json({ code: 'HISTORY_DETAIL_ERROR', message: 'Failed to fetch run' });
-    }
-});
-
-router.delete('/:runId', async (req, res) => {
-    try {
-        const count = await deleteRun(req.params.runId, req.user?.orgScope || []);
-        if (!count) return res.status(404).json({ code: 'NOT_FOUND', message: 'Run not found' });
-        return res.json({ ok: true });
-    } catch (err) {
-        return res.status(500).json({ code: 'HISTORY_DELETE_ERROR', message: 'Failed to delete run' });
-    }
-});
-
-router.delete('/', async (req, res) => {
-    try {
-        const count = await deleteAllRuns(req.user?.orgScope || []);
-        return res.json({ ok: true, deleted: count });
-    } catch (err) {
-        return res.status(500).json({ code: 'HISTORY_DELETE_ALL_ERROR', message: 'Failed to clear history' });
     }
 });
 

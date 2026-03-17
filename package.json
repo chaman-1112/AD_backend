@@ -6,6 +6,7 @@
     "start": "node index.js",
     "dev": "node --watch index.js",
     "test": "playwright test",
+    "postinstall": "playwright install",
     "playwright:install": "playwright install"
   },
   "dependencies": {

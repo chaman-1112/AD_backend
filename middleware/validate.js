@@ -17,18 +17,6 @@ export function validateLoginPayload(req, res, next) {
     return next();
 }
 
-export function validateSwitchEnvPayload(req, res, next) {
-    const body = req.body;
-    if (!isObject(body)) {
-        return res.status(400).json({ code: 'INVALID_BODY', message: 'Request body must be an object' });
-    }
-    const env = body.env;
-    if (env !== 'stage' && env !== 'production') {
-        return res.status(400).json({ code: 'INVALID_ENV', message: 'env must be "stage" or "production"' });
-    }
-    return next();
-}
-
 export function validateHistoryQuery(req, res, next) {
     const limitRaw = req.query.limit;
     const offsetRaw = req.query.offset;

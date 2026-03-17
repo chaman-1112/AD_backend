@@ -16,9 +16,27 @@ const router = Router();
 
 let activeProcess = null;
 let cancelledFlag = false;
+let activeRunId = null;
 const activeRuns = new Map(); // runId → { dataFile, failedStep, ... }
 
 function stripAnsi(str) { return str.replace(/\x1b\[[0-9;]*m/g, ''); }
+
+function tryAcquireRunLock(res, runId) {
+    if (activeRunId) {
+        res.status(409).json({
+            code: 'PROCESS_ALREADY_RUNNING',
+            message: 'Please wait, another process is already running.',
+            activeRunId,
+        });
+        return false;
+    }
+    activeRunId = runId;
+    return true;
+}
+
+function releaseRunLock(runId) {
+    if (activeRunId === runId) activeRunId = null;
+}
 
 function forceKillTree(pid) {
     if (!pid) return;
@@ -229,9 +247,11 @@ router.post('/', async (req, res) => {
     const { sourceOrgId, sourceCompanyId, newOrgName, newDomainUrl, newCompanyName, resumeFromStep, runId: clientRunId } = req.body;
     if (!sourceOrgId) return res.status(400).json({ error: 'sourceOrgId is required' });
     if (!hasOrgAccess(req.user, sourceOrgId)) return res.status(403).json({ error: 'No access to this organization' });
+    const runId = clientRunId || `run-${Date.now()}`;
+    if (!tryAcquireRunLock(res, runId)) return;
+    res.on('close', () => releaseRunLock(runId));
 
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
-    const runId = clientRunId || `run-${Date.now()}`;
     const sendEvent = createTrackedSender(res, runId);
     const persistStep = (step, seq = 0) => upsertStep(runId, step, seq);
     attachDisconnectCleanup(req, res, sendEvent);
@@ -460,9 +480,11 @@ router.post('/company', async (req, res) => {
     const { targetOrgId, sourceCompanyId, newCompanyName } = req.body;
     if (!targetOrgId || !sourceCompanyId) return res.status(400).json({ error: 'targetOrgId and sourceCompanyId are required' });
     if (!hasOrgAccess(req.user, targetOrgId)) return res.status(403).json({ error: 'No access to this organization' });
+    const runId = `run-${Date.now()}`;
+    if (!tryAcquireRunLock(res, runId)) return;
+    res.on('close', () => releaseRunLock(runId));
 
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
-    const runId = `run-${Date.now()}`;
     const sendEvent = createTrackedSender(res, runId);
     const persistStep = (step, seq = 0) => upsertStep(runId, step, seq);
     attachDisconnectCleanup(req, res, sendEvent);
@@ -562,8 +584,10 @@ router.post('/company', async (req, res) => {
 router.post('/create-user', async (req, res) => {
     cancelledFlag = false;
     const { baseUrl, email, password, companyId, name, numberOfUsers } = req.body;
-    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
     const runId = `run-${Date.now()}`;
+    if (!tryAcquireRunLock(res, runId)) return;
+    res.on('close', () => releaseRunLock(runId));
+    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
     const sendEvent = createTrackedSender(res, runId);
     const persistStep = (step, seq = 0) => upsertStep(runId, step, seq);
     attachDisconnectCleanup(req, res, sendEvent);
@@ -630,9 +654,11 @@ router.post('/create-user', async (req, res) => {
 router.post('/inventory-permissions', async (req, res) => {
     cancelledFlag = false;
     const { clientCompanyId, vendorCompanyIds, createApiClient, products } = req.body || {};
+    const runId = `run-${Date.now()}`;
+    if (!tryAcquireRunLock(res, runId)) return;
+    res.on('close', () => releaseRunLock(runId));
 
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
-    const runId = `run-${Date.now()}`;
     const sendEvent = createTrackedSender(res, runId);
     const persistStep = (step, seq = 0) => upsertStep(runId, step, seq);
     attachDisconnectCleanup(req, res, sendEvent);
@@ -745,6 +771,9 @@ router.post('/run-script', async (req, res) => {
     const { script, args, fileUpload } = req.body;
     console.log(`  [RUN-SCRIPT] Received: script=${script}, args=${JSON.stringify(args)}`);
     if (!script || !ALLOWED_SCRIPTS[script]) return res.status(400).json({ error: `Unknown script: ${script}` });
+    const runId = `run-${Date.now()}`;
+    if (!tryAcquireRunLock(res, runId)) return;
+    res.on('close', () => releaseRunLock(runId));
 
     const config = ALLOWED_SCRIPTS[script];
     const scriptArgs = Array.isArray(args) ? args.map(String) : [];
@@ -778,7 +807,6 @@ router.post('/run-script', async (req, res) => {
     }
 
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
-    const runId = `run-${Date.now()}`;
     const sendEvent = createTrackedSender(res, runId);
     const persistStep = (step, seq = 0) => upsertStep(runId, step, seq);
     attachDisconnectCleanup(req, res, sendEvent);

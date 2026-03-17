@@ -40,8 +40,8 @@ export default defineConfig({
     // // Navigation timeout
     // navigationTimeout: 3000000,
     
-    // Keep browser visible
-    headless: false,
+    // Run tests in headless mode
+    headless: true,
     
     // Set viewport to null to allow maximized window
     viewport: null,
