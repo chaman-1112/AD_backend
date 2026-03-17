@@ -26,6 +26,7 @@ import path from 'path';
 dotenv.config();
 
 const { Pool } = pg;
+const SAMPLE_SHEET_URL = 'https://docs.google.com/spreadsheets/d/1cFRVoDdhwU9zlCH_q3e-TR5KkRvHuxiy9KmTU4SsaKo/edit?usp=sharing';
 
 const colors = {
     reset: '\x1b[0m',
@@ -51,6 +52,82 @@ function createPool() {
         password: process.env.DB_PASSWORD,
         ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false,
     });
+}
+
+function isHttpUrl(value) {
+    return /^https?:\/\//i.test(String(value || '').trim());
+}
+
+function parseGoogleSheetId(urlString) {
+    try {
+        const url = new URL(urlString);
+        if (!/docs\.google\.com$/i.test(url.hostname)) return null;
+        const parts = url.pathname.split('/').filter(Boolean);
+        const dIndex = parts.indexOf('d');
+        if (parts[0] === 'spreadsheets' && dIndex >= 0 && parts[dIndex + 1]) {
+            return parts[dIndex + 1];
+        }
+    } catch {
+        return null;
+    }
+    return null;
+}
+
+function normalizeWorkbookInput(input) {
+    const raw = String(input || '').trim().replace(/^['"]|['"]$/g, '');
+    return raw.replace(/^\d+\s*,\s*/, '');
+}
+
+function resolveLocalWorkbookPath(rawInput) {
+    const normalizedInput = normalizeWorkbookInput(rawInput);
+    if (!normalizedInput) return null;
+
+    const userHome = process.env.USERPROFILE || process.env.HOME || '';
+    const candidatePaths = [
+        normalizedInput,
+        path.resolve(process.cwd(), normalizedInput),
+        path.resolve(process.cwd(), 'tmp', normalizedInput),
+        userHome ? path.resolve(userHome, 'Desktop', normalizedInput) : null,
+        userHome ? path.resolve(userHome, 'Downloads', normalizedInput) : null,
+    ].filter(Boolean);
+
+    for (const candidate of candidatePaths) {
+        if (fs.existsSync(candidate)) return candidate;
+    }
+
+    return null;
+}
+
+async function resolveWorkbookPath(xlsxPathOrUrl) {
+    const normalizedInput = normalizeWorkbookInput(xlsxPathOrUrl);
+    if (!isHttpUrl(normalizedInput)) {
+        const resolvedPath = resolveLocalWorkbookPath(normalizedInput);
+        if (!resolvedPath) {
+            throw new Error(
+                `File not found: ${normalizedInput}. Provide an absolute path, or place the file in ${process.cwd()} or ${path.resolve(process.cwd(), 'tmp')}`
+            );
+        }
+        return { workbookPath: resolvedPath, cleanupPath: null };
+    }
+
+    let downloadUrl = normalizedInput;
+    const sheetId = parseGoogleSheetId(normalizedInput);
+    if (sheetId) {
+        downloadUrl = `https://docs.google.com/spreadsheets/d/${sheetId}/export?format=xlsx`;
+    }
+
+    const res = await fetch(downloadUrl);
+    if (!res.ok) {
+        throw new Error(`Unable to download sheet (${res.status}) from ${downloadUrl}`);
+    }
+
+    const arrayBuffer = await res.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+    const tmpDir = path.resolve(process.cwd(), 'tmp');
+    fs.mkdirSync(tmpDir, { recursive: true });
+    const filePath = path.join(tmpDir, `sheet-import-${Date.now()}.xlsx`);
+    fs.writeFileSync(filePath, buffer);
+    return { workbookPath: filePath, cleanupPath: filePath };
 }
 
 function normalizeToken(value) {
@@ -532,12 +609,34 @@ async function loginAndGetPage(baseUrl) {
 }
 
 async function getCsrfToken(page, baseUrl) {
-    await page.goto(`${baseUrl}/superadmin/custom_search_menu_types`, { waitUntil: 'networkidle' });
-    const csrf = await page.evaluate(() =>
-        document.querySelector('meta[name="csrf-token"]')?.getAttribute('content')
-    );
-    if (!csrf) throw new Error('Could not obtain CSRF token');
-    return csrf;
+    const errors = [];
+    try {
+        const existingCsrf = await page.evaluate(() =>
+            document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || ''
+        );
+        if (existingCsrf) return existingCsrf;
+    } catch (err) {
+        errors.push(`current page read failed: ${err.message}`);
+    }
+
+    const candidates = [
+        `${baseUrl}/superadmin/custom_search_menu_types`,
+        `${baseUrl}/superadmin`,
+        `${baseUrl}/superadmin/login`,
+    ];
+    for (const url of candidates) {
+        try {
+            await page.goto(url, { waitUntil: 'domcontentloaded' });
+            const csrf = await page.evaluate(() =>
+                document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || ''
+            );
+            if (csrf) return csrf;
+            errors.push(`no csrf meta at ${url}`);
+        } catch (err) {
+            errors.push(`navigation failed at ${url}: ${err.message}`);
+        }
+    }
+    throw new Error(`Could not obtain CSRF token. ${errors.join(' | ')}`);
 }
 
 function checkRedirect(response, resourcePath) {
@@ -657,6 +756,8 @@ async function importFromSheet(targetOrgId, xlsxPath, sheetName) {
         browser = session.browser;
         const { page } = session;
         log('  ✓ Logged in successfully', 'green');
+        let csrf = await getCsrfToken(page, baseUrl);
+        log('  ✓ CSRF token obtained', 'green');
 
         const rowIdToTypeId = new Map();
         let createdTypes = 0;
@@ -676,7 +777,6 @@ async function importFromSheet(targetOrgId, xlsxPath, sheetName) {
             let ok = false;
             for (let attempt = 1; attempt <= 2 && !ok; attempt++) {
                 try {
-                    const csrf = await getCsrfToken(page, baseUrl);
                     const response = await createMenuType(page, csrf, baseUrl, row, null, pngPayload, svgPayload);
                     const result = checkRedirect(response, 'custom_search_menu_types');
                     if (result.ok) {
@@ -686,9 +786,11 @@ async function importFromSheet(targetOrgId, xlsxPath, sheetName) {
                         log(`    ✓ Created type id=${result.newId}`, 'green');
                     } else {
                         log(`    ✗ Attempt ${attempt} failed (${result.status})`, 'red');
+                        if (attempt < 2) csrf = await getCsrfToken(page, baseUrl);
                     }
                 } catch (err) {
                     log(`    ✗ Attempt ${attempt} error: ${err.message}`, 'red');
+                    if (attempt < 2) csrf = await getCsrfToken(page, baseUrl);
                 }
             }
             if (!ok) failedTypes++;
@@ -713,7 +815,6 @@ async function importFromSheet(targetOrgId, xlsxPath, sheetName) {
             let ok = false;
             for (let attempt = 1; attempt <= 2 && !ok; attempt++) {
                 try {
-                    const csrf = await getCsrfToken(page, baseUrl);
                     const response = await createMenuType(page, csrf, baseUrl, row, mappedParentTypeId, pngPayload, svgPayload);
                     const result = checkRedirect(response, 'custom_search_menu_types');
                     if (result.ok) {
@@ -723,9 +824,11 @@ async function importFromSheet(targetOrgId, xlsxPath, sheetName) {
                         log(`    ✓ Created type id=${result.newId}`, 'green');
                     } else {
                         log(`    ✗ Attempt ${attempt} failed (${result.status})`, 'red');
+                        if (attempt < 2) csrf = await getCsrfToken(page, baseUrl);
                     }
                 } catch (err) {
                     log(`    ✗ Attempt ${attempt} error: ${err.message}`, 'red');
+                    if (attempt < 2) csrf = await getCsrfToken(page, baseUrl);
                 }
             }
             if (!ok) failedTypes++;
@@ -743,7 +846,6 @@ async function importFromSheet(targetOrgId, xlsxPath, sheetName) {
             let ok = false;
             for (let attempt = 1; attempt <= 2 && !ok; attempt++) {
                 try {
-                    const csrf = await getCsrfToken(page, baseUrl);
                     const response = await createSearchMenu(page, csrf, baseUrl, targetOrgId, mappedTypeId, row.menuOrder);
                     const result = checkRedirect(response, 'custom_search_menus');
                     if (result.ok) {
@@ -752,9 +854,11 @@ async function importFromSheet(targetOrgId, xlsxPath, sheetName) {
                         log(`  ✓ Menu created for row ${row.rowId} (menu id=${result.newId})`, 'green');
                     } else {
                         log(`  ✗ Menu attempt ${attempt} failed for row ${row.rowId} (${result.status})`, 'red');
+                        if (attempt < 2) csrf = await getCsrfToken(page, baseUrl);
                     }
                 } catch (err) {
                     log(`  ✗ Menu attempt ${attempt} error for row ${row.rowId}: ${err.message}`, 'red');
+                    if (attempt < 2) csrf = await getCsrfToken(page, baseUrl);
                 }
             }
 
@@ -778,12 +882,14 @@ const args = process.argv.slice(2);
 if (args.length < 2) {
     log('\n✗ Missing arguments', 'red');
     log('\nUsage:', 'yellow');
-    log('  node scripts/importCustomSearchMenusFromSheet.js <targetOrgId> <xlsxPath> [sheetName]', 'cyan');
+    log('  node scripts/importCustomSearchMenusFromSheet.js <targetOrgId> <xlsxPath|sheetUrl> [sheetName]', 'cyan');
+    log('\nSample sheet:', 'yellow');
+    log(`  ${SAMPLE_SHEET_URL}`, 'cyan');
     process.exit(1);
 }
 
 const targetOrgId = Number(args[0]);
-const xlsxPath = args[1];
+const xlsxPathOrUrl = args[1];
 const sheetName = args[2];
 
 if (Number.isNaN(targetOrgId)) {
@@ -791,18 +897,18 @@ if (Number.isNaN(targetOrgId)) {
     process.exit(1);
 }
 
-if (!fs.existsSync(xlsxPath)) {
-    log(`\n✗ File not found: ${xlsxPath}`, 'red');
-    process.exit(1);
-}
-
-importFromSheet(targetOrgId, xlsxPath, sheetName)
-    .then(() => {
+let cleanupPath = null;
+resolveWorkbookPath(xlsxPathOrUrl)
+    .then(async ({ workbookPath, cleanupPath: tmpPath }) => {
+        cleanupPath = tmpPath;
+        await importFromSheet(targetOrgId, workbookPath, sheetName);
         log('✓ Import completed successfully\n', 'green');
+        if (cleanupPath && fs.existsSync(cleanupPath)) fs.unlinkSync(cleanupPath);
         process.exit(0);
     })
     .catch((error) => {
         log(`\n✗ Import failed: ${error.message}\n`, 'red');
         console.error(error);
+        if (cleanupPath && fs.existsSync(cleanupPath)) fs.unlinkSync(cleanupPath);
         process.exit(1);
     });

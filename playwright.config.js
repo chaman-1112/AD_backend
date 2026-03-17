@@ -53,8 +53,8 @@ export default defineConfig({
     // Screenshot on failure
     screenshot: 'only-on-failure',
     
-    // Video on failure
-    video: 'retain-on-failure',
+    // Disable videos to reduce test artifacts size
+    video: 'off',
     
     launchOptions: {
       // Start browser maximized
@@ -76,7 +76,6 @@ export default defineConfig({
         viewport: null, // Ensure maximized window
         launchOptions: {
           args: ['--start-maximized'],
-          userDataDir: 'C:\\Users\\ajbha\\AppData\\Local\\Microsoft\\Edge\\User Data',
         }
       },
     }

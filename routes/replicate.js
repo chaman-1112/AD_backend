@@ -749,6 +749,8 @@ router.post('/inventory-permissions', async (req, res) => {
 const ALLOWED_SCRIPTS = {
     'copyCustomSearchMenus':  { file: 'scripts/copyCustomSearchMenus.js', minArgCount: 2, maxArgCount: 4 },
     'copyOrgWhiteLabel':      { file: 'scripts/copyOrgWhiteLabel.js', argCount: 2 },
+    'copySelectiveCustomizations': { file: 'scripts/copyCustomizations.js', minArgCount: 3, maxArgCount: 4 },
+    'copyCustomizations':     { file: 'scripts/copyCustomizations.js', minArgCount: 3, maxArgCount: 4 },
     'copyOrgCustomizations':  { file: 'scripts/copyOrgCustomizations.js', argCount: 2 },
     'copyCompanyCustomizations': { file: 'scripts/copyCompanyCustomizations.js', argCount: 2 },
     'testFeatureActivation':  { file: 'scripts/testFeatureActivation.js', argCount: 2 },
@@ -759,6 +761,8 @@ const ALLOWED_SCRIPTS = {
 const SCRIPT_STEP_DEFS = {
     copyCustomSearchMenus: [{ id: 'init', label: 'Initialize' }, { id: 'run', label: 'Copy Search Menu Types & Menus' }],
     copyOrgWhiteLabel: [{ id: 'init', label: 'Initialize' }, { id: 'run', label: 'Copy White Label Configs' }],
+    copySelectiveCustomizations: [{ id: 'init', label: 'Initialize' }, { id: 'run', label: 'Copy Selected Customizations' }],
+    copyCustomizations: [{ id: 'init', label: 'Initialize' }, { id: 'run', label: 'Copy Selected Customizations' }],
     copyOrgCustomizations: [{ id: 'init', label: 'Initialize' }, { id: 'run', label: 'Copy Customizations, Texts & Nav' }],
     copyCompanyCustomizations: [{ id: 'init', label: 'Initialize' }, { id: 'run', label: 'Copy Company Customizations' }],
     testFeatureActivation: [{ id: 'init', label: 'Initialize' }, { id: 'run', label: 'Activate Features on Target' }],
